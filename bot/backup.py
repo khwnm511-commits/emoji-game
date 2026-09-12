@@ -51,7 +51,7 @@ async def send_backup(bot: Bot, path: str, note: str = "🛡 بکاپ خودکا
         config.OWNER_ID,
         document=BufferedInputFile(data, filename=os.path.basename(path)),
         caption=f"{note}\n📦 {len(data):,} بایت — {time.strftime('%Y-%m-%d %H:%M')}\n"
-                f"برای برگردوندن: فایل رو با اسم game.db جای DB_PATH بذار.")
+                f"برای برگردوندن: اسم فایل رو بذار game.db و جای فایل دیتابیس اصلی بذار.")
     return True
 
 

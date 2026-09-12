@@ -1,4 +1,4 @@
-import os, json, time
+import logging, os, json, time
 import aiosqlite
 from . import config
 
@@ -138,6 +138,14 @@ async def init():
     d = os.path.dirname(path)
     if d and not os.path.exists(d):
         os.makedirs(d, exist_ok=True)
+    # ریست کامل: با متغیر محیطی RESET_DB=1 — فایل دیتابیس و WAL پاک می‌شن
+    if os.getenv("RESET_DB") == "1":
+        for suf in ("", "-wal", "-shm"):
+            try:
+                os.remove(path + suf)
+            except FileNotFoundError:
+                pass
+        logging.getLogger("db").warning("RESET_DB=1 → دیتابیس کامل ریست شد")
     _db = await aiosqlite.connect(path)
     _db.row_factory = aiosqlite.Row
     await _db.executescript(SCHEMA)
