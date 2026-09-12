@@ -1,43 +1,59 @@
 import os
-import asyncio
 
+# ————— اتصال‌ها —————
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-OWNER_ID = int(os.getenv("OWNER_ID", "0"))          # تلگرام آیدی صاحب ربات (برای اعلان توکن railway)
-RAILWAY_TOKEN = os.getenv("RAILWAY_TOKEN", "")      # توکن railway برای مانیتورینگ
-DB_PATH = os.getenv("DB_PATH", "/data/game.db")     # روی railway ولوم /data
-DEV_DB = os.getenv("DEV_DB", "")                    # برای تست لوکال
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+RAILWAY_TOKEN = os.getenv("RAILWAY_TOKEN", "")
+DATABASE_URL = os.getenv("DATABASE_URL", "")          # PostgreSQL
+REDIS_URL = os.getenv("REDIS_URL", "")               # اختیاری — بدونش از حافظهٔ درون‌پروسه استفاده می‌شه
+CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))       # کانال رسمی بازی
+TZ = os.getenv("TZ_NAME", "Asia/Tehran")
 
-SEASON = 1  # فصل ۱ — فقط از دیتابیس خونده می‌شه، این مقدار اولیه‌ست
+SEASON = 1
 
-# ————— تنظیمات بازی —————
+# ————— شخصیت —————
 START_HP = 100
-START_ATK = 10
-START_DEF = 5
-START_COINS = 50
+START_ENERGY = 100
 MAX_ENERGY = 100
-ENERGY_REGEN_SEC = 60          # هر دقیقه ۱ انرژی
-ENERGY_PER_ACTION = 5
+ENERGY_REGEN_SEC = 60          # ۱ انرژی در دقیقه (سرور-ساید)
+ENERGY_COST_BATTLE = 5
+ENERGY_COST_ACTION = 3
 
-# امتیاز هیچ‌وقت کم نمی‌شه — فقط افزایشی است
-SCORE_KILL_PVE = 15
-SCORE_WIN_PVP = 40
-SCORE_WIN_LOSS = 15            # بازنده هم امتیاز می‌گیره که سکر کم نشه
-SCORE_INFECTION_HOUR = 10      # هر ساعت عفونت فعال → امتیاز به مبتلا‌کننده
-SCORE_BOSS_HIT = 5
-SCORE_BOSS_KILL = 250
+XP_PER_LEVEL = 120             # سطح n → n*120 xp
 
-# ————— باس‌ها —————
-BOSS_CONFIG = {
-    "mini":     {"every": 3 * 3600,  "hp": 2000,   "name": "🐺 گرگ خاکستری",    "window": 900,   "warn": 600},
-    "regional": {"every": 12 * 3600, "hp": 8000,   "name": "🐉 اژدهای کوهستان",  "window": 1800,  "warn": 900},
-    "story":    {"every": 24 * 3600, "hp": 20000,  "name": "☠️ جادوگ سیاه",      "window": 2400,  "warn": 1200},
-    "world":    {"every": 24 * 3600, "hp": 50000,  "name": "👑 پادشاه سایه‌ها",   "window": 3600,  "warn": 1800},
-    "final":    {"every": 7 * 86400,"hp": 150000, "name": "💀 ویرانگر جهانی",    "window": 5400,  "warn": 3600},
+# ————— نبرد —————
+CRIT_BASE = 0.05
+DODGE_BASE = 0.05
+BLOCK_BASE = 0.10
+COUNTER_BASE = 0.10
+MAX_STATUS_TURNS = 4
+
+# ————— ویروس —————
+INFECTION_CHECK_SEC = 6 * 3600     # هر ۶ ساعت پیشروی/بررسی عفونت
+VACCINE_COST = 15                  # سکه
+
+# ————— زمان‌بندی باس (سرور-ساید) —————
+BOSS_CHECK_SEC = 60                # اسکن برنامه باس‌ها
+
+# ————— اقتصاد —————
+START_COINS = 50
+
+# ————— استارز —————
+STARS_PACKAGES = {
+    "p25":  {"stars": 25,  "label": "پک بقا",       "coins": 300,  "vaccines": 2,  "energy": 0,  "slots": 0, "boost": None,   "emoji_pack": 0},
+    "p60":  {"stars": 60,  "label": "پک مأمور",     "coins": 800,  "vaccines": 5,  "energy": 50, "slots": 0, "boost": None,   "emoji_pack": 0},
+    "p120": {"stars": 120, "label": "پک عملیات",    "coins": 1800, "vaccines": 5,  "energy": 0,  "slots": 0, "boost": "xp",   "emoji_pack": 0},
+    "p250": {"stars": 250, "label": "پک تایرنت",    "coins": 4000, "vaccines": 10, "energy": 100, "slots": 10, "boost": "dmg", "emoji_pack": 0},
+    "p500": {"stars": 500, "label": "پک آمبرلا",    "coins": 9000, "vaccines": 20, "energy": 200, "slots": 20, "boost": "all", "emoji_pack": 10},
 }
+BOOST_HOURS = {"xp": 24, "dmg": 24, "all": 72}
 
-# ————— گپ سراسری —————
-CHAT_RATE_SEC = 12            # هر بازیکن هر ۱۲ ثانیه یک پیام
-CHAT_MAX_LEN = 400
+# ————— کانال —————
+CHANNEL_REMIND_SEC = 40 * 60       # یادآوری عضویت حداکثر هر ۴۰ دقیقه
 
 # ————— مانیتورینگ railway —————
-RAILWAY_CHECK_SEC = 6 * 3600   # هر ۶ ساعت یک بار
+RAILWAY_CHECK_SEC = 6 * 3600
+
+# ————— UI: رنگ دکمه‌ها (استاندارد ثابت) —————
+BLUE, RED, GREEN, YELLOW, DARK = "🟦", "🟩", "🟥", "🟨", "⚫️"
+# 🔵 منو/عملیات عادی | 🔴 خطر/مبارزه | 🟢 تأیید/درمان | 🟡 هشدار/وضعیت | ⚫ اطلاعات/فرعی

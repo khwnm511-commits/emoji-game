@@ -1,200 +1,268 @@
-import logging, os, json, time
-import aiosqlite
+"""PostgreSQL — pool با asyncpg + اسکیما + تراکنش/قفل امن."""
+import asyncio, logging, os, time
+import asyncpg
 from . import config
 
-_db: aiosqlite.Connection | None = None
+log = logging.getLogger("db")
+_pool: asyncpg.Pool | None = None
+_locks: dict[str, asyncio.Lock] = {}
+_locks_guard = asyncio.Lock()
 
 SCHEMA = """
-PRAGMA journal_mode=WAL;
-PRAGMA synchronous=NORMAL;
-
-CREATE TABLE IF NOT EXISTS config (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
+CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS players (
-    id INTEGER PRIMARY KEY,            -- تلگرام آیدی
+    id BIGINT PRIMARY KEY,
     name TEXT NOT NULL,
     username TEXT,
-    score INTEGER NOT NULL DEFAULT 0,   -- امتیاز: هیچ‌وقت کم نمی‌شه
-    coins INTEGER NOT NULL DEFAULT 50,
-    level INTEGER NOT NULL DEFAULT 1,
-    xp INTEGER NOT NULL DEFAULT 0,
-    hp INTEGER NOT NULL DEFAULT 100,
-    max_hp INTEGER NOT NULL DEFAULT 100,
-    attack INTEGER NOT NULL DEFAULT 10,
-    defense INTEGER NOT NULL DEFAULT 5,
-    energy INTEGER NOT NULL DEFAULT 100,
-    infected_by INTEGER,                -- آیدی مبتلا‌کننده (بازی ویروس)
-    infected_until INTEGER,            -- تایم‌استمپ پایان عفونت
-    vaccines INTEGER NOT NULL DEFAULT 0,
-    emojis_owned TEXT NOT NULL DEFAULT '[]',
-    chat_on INTEGER NOT NULL DEFAULT 1, -- عضو گپ سراسری
-    boss_sub INTEGER NOT NULL DEFAULT 1,-- اعلان باس‌ها
-    relationship_points INTEGER NOT NULL DEFAULT 0,
-    created_date INTEGER NOT NULL,
-    last_active INTEGER NOT NULL,
-    last_chat INTEGER NOT NULL DEFAULT 0,
-    last_boss_hit INTEGER NOT NULL DEFAULT 0,
-    last_infect INTEGER NOT NULL DEFAULT 0,
-    broken_hearts INTEGER NOT NULL DEFAULT 0,   -- سابقه قطع رابطه
-    betrayals INTEGER NOT NULL DEFAULT 0
+    gender TEXT NOT NULL,
+    appearance TEXT NOT NULL,
+    background TEXT NOT NULL,
+    level INT NOT NULL DEFAULT 1,
+    xp INT NOT NULL DEFAULT 0,
+    score INT NOT NULL DEFAULT 0,
+    coins INT NOT NULL DEFAULT 50,
+    hp INT NOT NULL DEFAULT 100,
+    max_hp INT NOT NULL DEFAULT 100,
+    energy INT NOT NULL DEFAULT 100,
+    energy_ts BIGINT NOT NULL DEFAULT 0,
+    atk INT NOT NULL DEFAULT 10,
+    def INT NOT NULL DEFAULT 5,
+    spd INT NOT NULL DEFAULT 5,
+    luck INT NOT NULL DEFAULT 5,
+    reputation INT NOT NULL DEFAULT 0,
+    region TEXT NOT NULL DEFAULT 'city',
+    story_node TEXT NOT NULL DEFAULT 's1_intro',
+    story_flags JSONB NOT NULL DEFAULT '{}',
+    infection_virus TEXT,
+    infection_stage INT NOT NULL DEFAULT 0,
+    infection_ts BIGINT NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active',
+    status_until BIGINT NOT NULL DEFAULT 0,
+    abilities JSONB NOT NULL DEFAULT '["field_medic"]',
+    weapon TEXT,
+    armor TEXT,
+    slots INT NOT NULL DEFAULT 20,
+    boost JSONB NOT NULL DEFAULT '{}',
+    emojis_owned JSONB NOT NULL DEFAULT '[]',
+    chat_on BOOLEAN NOT NULL DEFAULT TRUE,
+    boss_sub BOOLEAN NOT NULL DEFAULT TRUE,
+    created_date BIGINT NOT NULL,
+    last_active BIGINT NOT NULL,
+    last_remind BIGINT NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_players_score ON players(score DESC);
-CREATE INDEX IF NOT EXISTS idx_players_active ON players(last_active DESC);
 
-CREATE TABLE IF NOT EXISTS relationships (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    player_id INTEGER NOT NULL,
-    target_id INTEGER NOT NULL,        -- آیدی بازیکن یا NPC
-    target_name TEXT NOT NULL,
-    is_npc INTEGER NOT NULL DEFAULT 0,
-    trust INTEGER NOT NULL DEFAULT 0,      -- اعتماد
-    loyalty INTEGER NOT NULL DEFAULT 0,   -- وفاداری
-    respect INTEGER NOT NULL DEFAULT 0,   -- احترام
-    history INTEGER NOT NULL DEFAULT 0,  -- سابقه مشترک
-    status TEXT NOT NULL DEFAULT 'stranger', -- stranger/friend/close/partner/rival/enemy/broken
-    hidden INTEGER NOT NULL DEFAULT 1,    -- رابطه مخفی تا trust>50
-    broken INTEGER NOT NULL DEFAULT 0,    -- سابقه قطع رابطه
-    betray_count INTEGER NOT NULL DEFAULT 0,
-    last_action INTEGER NOT NULL DEFAULT 0,
-    UNIQUE(player_id, target_id)
+CREATE TABLE IF NOT EXISTS npc_rel (
+    player_id BIGINT NOT NULL,
+    npc_id TEXT NOT NULL,
+    trust INT NOT NULL DEFAULT 0,
+    loyalty INT NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'neutral',
+    PRIMARY KEY (player_id, npc_id)
 );
-CREATE INDEX IF NOT EXISTS idx_rel_player ON relationships(player_id);
+
+CREATE TABLE IF NOT EXISTS player_rel (
+    player_id BIGINT NOT NULL,
+    target_id BIGINT NOT NULL,
+    trust INT NOT NULL DEFAULT 0,
+    loyalty INT NOT NULL DEFAULT 0,
+    friendship INT NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'stranger',
+    PRIMARY KEY (player_id, target_id)
+);
+
+CREATE TABLE IF NOT EXISTS friends (
+    player_id BIGINT NOT NULL,
+    friend_id BIGINT NOT NULL,
+    created_date BIGINT NOT NULL,
+    PRIMARY KEY (player_id, friend_id)
+);
+
+CREATE TABLE IF NOT EXISTS inventory (
+    player_id BIGINT NOT NULL,
+    item_id TEXT NOT NULL,
+    qty INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (player_id, item_id)
+);
 
 CREATE TABLE IF NOT EXISTS battles (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind TEXT NOT NULL,                -- pvp / pve / boss
-    p1 INTEGER NOT NULL,
-    p2 INTEGER,                        -- بازیکن دوم یا NULL برای boss
-    npc TEXT,
-    state TEXT NOT NULL,               -- json
-    turn INTEGER NOT NULL DEFAULT 1,  -- 1 یا 2
-    active INTEGER NOT NULL DEFAULT 1,
-    created_date INTEGER NOT NULL
+    id SERIAL PRIMARY KEY,
+    kind TEXT NOT NULL,
+    chat_id BIGINT NOT NULL DEFAULT 0,
+    p1 BIGINT NOT NULL,
+    p2 BIGINT,
+    enemy_id TEXT,
+    boss_event_id INT,
+    state JSONB NOT NULL DEFAULT '{}',
+    turn INT NOT NULL DEFAULT 1,
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_date BIGINT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_battles_p1 ON battles(p1, active);
-CREATE INDEX IF NOT EXISTS idx_battles_p2 ON battles(p2, active);
+CREATE INDEX IF NOT EXISTS idx_battles_active ON battles(active, p1);
 
 CREATE TABLE IF NOT EXISTS boss_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind TEXT NOT NULL,               -- mini/regional/story/world/final
-    name TEXT NOT NULL,
-    hp INTEGER NOT NULL,
-    max_hp INTEGER NOT NULL,
-    phase INTEGER NOT NULL DEFAULT 1,
-    starts_at INTEGER NOT NULL,       -- زمان شروع (کانت‌داون قبلش warn)
-    ends_at INTEGER NOT NULL,
-    active INTEGER NOT NULL DEFAULT 1,
-    ranking TEXT NOT NULL DEFAULT '{}',
-    msg_chat_id INTEGER,
-    msg_id INTEGER,
-    created_date INTEGER NOT NULL
+    id SERIAL PRIMARY KEY,
+    boss_id TEXT NOT NULL,
+    region TEXT NOT NULL,
+    chat_id BIGINT NOT NULL DEFAULT 0,
+    phase INT NOT NULL DEFAULT 1,
+    hp INT NOT NULL,
+    max_hp INT NOT NULL,
+    ranking JSONB NOT NULL DEFAULT '{}',
+    msg_chat_id BIGINT,
+    msg_id BIGINT,
+    starts_at BIGINT NOT NULL,
+    ends_at BIGINT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'scheduled',
+    created_date BIGINT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS boss_hits (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_id INTEGER NOT NULL,
-    player_id INTEGER NOT NULL,
-    dmg INTEGER NOT NULL,
-    ts INTEGER NOT NULL
+    id SERIAL PRIMARY KEY,
+    event_id INT NOT NULL,
+    player_id BIGINT NOT NULL,
+    dmg INT NOT NULL,
+    ts BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_bosshits ON boss_hits(event_id, player_id);
 
-CREATE TABLE IF NOT EXISTS chat_messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    player_id INTEGER NOT NULL,
+CREATE TABLE IF NOT EXISTS worlds (
+    chat_id BIGINT PRIMARY KEY,
     name TEXT NOT NULL,
-    level INTEGER NOT NULL,
-    text TEXT NOT NULL,
-    ts INTEGER NOT NULL
+    region_unlocked INT NOT NULL DEFAULT 1,
+    infection INT NOT NULL DEFAULT 0,
+    created_date BIGINT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS star_payments (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    player_id INTEGER NOT NULL,
-    stars INTEGER NOT NULL,
-    payload TEXT NOT NULL,
-    charge_id TEXT NOT NULL,
-    ts INTEGER NOT NULL,
-    UNIQUE(charge_id)
+CREATE TABLE IF NOT EXISTS events (
+    id SERIAL PRIMARY KEY,
+    kind TEXT NOT NULL,
+    data JSONB NOT NULL DEFAULT '{}',
+    starts_at BIGINT NOT NULL,
+    ends_at BIGINT NOT NULL,
+    announced BOOLEAN NOT NULL DEFAULT FALSE
 );
 
-CREATE TABLE IF NOT EXISTS season_stats (
-    season INTEGER NOT NULL,
-    player_id INTEGER NOT NULL,
-    best_level INTEGER NOT NULL DEFAULT 1,
-    kills INTEGER NOT NULL DEFAULT 0,
-    wins INTEGER NOT NULL DEFAULT 0,
-    boss_dmg INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY(season, player_id)
+CREATE TABLE IF NOT EXISTS missions (
+    id SERIAL PRIMARY KEY,
+    player_id BIGINT NOT NULL,
+    mission_id TEXT NOT NULL,
+    region TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    progress INT NOT NULL DEFAULT 0,
+    created_date BIGINT NOT NULL,
+    done_date BIGINT
+);
+CREATE INDEX IF NOT EXISTS idx_missions ON missions(player_id, status);
+
+CREATE TABLE IF NOT EXISTS clans (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    leader_id BIGINT NOT NULL,
+    points INT NOT NULL DEFAULT 0,
+    created_date BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS clan_war (
+    week TEXT NOT NULL,
+    clan_id INT NOT NULL,
+    points INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (week, clan_id)
+);
+
+CREATE TABLE IF NOT EXISTS clan_members (
+    player_id BIGINT PRIMARY KEY,
+    clan_id INT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member'
+);
+
+CREATE TABLE IF NOT EXISTS purchases (
+    id SERIAL PRIMARY KEY,
+    player_id BIGINT NOT NULL,
+    pack TEXT NOT NULL,
+    charge_id TEXT NOT NULL UNIQUE,
+    stars INT NOT NULL,
+    ts BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS transactions (
+    id SERIAL PRIMARY KEY,
+    player_id BIGINT NOT NULL,
+    kind TEXT NOT NULL,
+    ref TEXT NOT NULL,
+    amount INT NOT NULL DEFAULT 0,
+    meta JSONB NOT NULL DEFAULT '{}',
+    ts BIGINT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tx_ref ON transactions(ref);
+
+CREATE TABLE IF NOT EXISTS story_log (
+    id SERIAL PRIMARY KEY,
+    player_id BIGINT NOT NULL,
+    node TEXT NOT NULL,
+    choice TEXT,
+    ts BIGINT NOT NULL
 );
 """
 
+TABLES = ["players", "npc_rel", "player_rel", "friends", "inventory", "battles",
+          "boss_events", "boss_hits", "worlds", "events", "missions", "clans",
+          "clan_war", "clan_members", "purchases", "transactions", "story_log", "config"]
+
+
 async def init():
-    global _db
-    path = config.DEV_DB or config.DB_PATH
-    d = os.path.dirname(path)
-    if d and not os.path.exists(d):
-        os.makedirs(d, exist_ok=True)
-    # ریست کامل: با متغیر محیطی RESET_DB=1 — فایل دیتابیس و WAL پاک می‌شن
+    global _pool
+    # اتصال با تلاش مجدد (منتظر بالا آمدن postgres می‌مونیم)
+    for i in range(30):
+        try:
+            _pool = await asyncpg.create_pool(config.DATABASE_URL, min_size=2, max_size=10,
+                                               command_timeout=30)
+            break
+        except Exception as e:
+            log.warning("Postgres در دسترس نیست (%s/30): %s", i + 1, e)
+            await asyncio.sleep(10)
+    assert _pool, "اتصال PostgreSQL برقرار نشد — DATABASE_URL چک کن"
     if os.getenv("RESET_DB") == "1":
-        for suf in ("", "-wal", "-shm"):
-            try:
-                os.remove(path + suf)
-            except FileNotFoundError:
-                pass
-        logging.getLogger("db").warning("RESET_DB=1 → دیتابیس کامل ریست شد")
-    _db = await aiosqlite.connect(path)
-    _db.row_factory = aiosqlite.Row
-    await _db.executescript(SCHEMA)
-    await _db.commit()
+        async with _pool.acquire() as c:
+            await c.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+        log.warning("RESET_DB=1 → کل دیتابیس ریست شد")
+    async with _pool.acquire() as c:
+        await c.execute(SCHEMA)
+    log.info("PostgreSQL آماده — اسکیما اعمال شد")
 
-async def db():
-    assert _db is not None, "db not initialised"
-    return _db
 
-# ——————————————— کمکی‌ها ———————————————
+async def pool() -> asyncpg.Pool:
+    assert _pool is not None, "db not initialised"
+    return _pool
+
+
+async def close():
+    if _pool:
+        await _pool.close()
+
+
+async def lock(key: str) -> asyncio.Lock:
+    """قفل per-entity برای جلوگیری از Race Condition — بدون Redis هم امن (یک پروسه)."""
+    async with _locks_guard:
+        if key not in _locks:
+            _locks[key] = asyncio.Lock()
+        return _locks[key]
+
+
 async def get_config(key: str, default=None):
-    cur = await (await db()).execute("SELECT value FROM config WHERE key=?", (key,))
-    row = await cur.fetchone()
-    return row["value"] if row else default
+    async with _pool.acquire() as c:
+        v = await c.fetchval("SELECT value FROM config WHERE key=$1", key)
+        return v if v is not None else default
+
 
 async def set_config(key: str, value):
-    await (await db()).execute(
-        "INSERT INTO config(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (key, str(value)))
-    await (await db()).commit()
+    async with _pool.acquire() as c:
+        await c.execute("INSERT INTO config VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=$2",
+                        key, str(value))
 
-async def get_player(pid: int):
-    cur = await (await db()).execute("SELECT * FROM players WHERE id=?", (pid,))
-    return await cur.fetchone()
 
-async def ensure_player(pid: int, name: str, username: str | None):
-    await (await db()).execute(
-        """INSERT INTO players(id,name,username,created_date,last_active)
-           VALUES(?,?,?,?,?)
-           ON CONFLICT(id) DO UPDATE SET
-             name=excluded.name,
-             username=COALESCE(excluded.username, players.username),
-             last_active=excluded.last_active""",
-        (pid, name, username, int(time.time()), int(time.time())))
-    await (await db()).commit()
-
-async def update_player(pid: int, **fields):
-    if not fields:
-        return
-    sets = ",".join(f"{k}=?" for k in fields)
-    await (await db()).execute(f"UPDATE players SET {sets} WHERE id=?", (*fields.values(), pid))
-    await (await db()).commit()
-
-async def add_score(pid: int, score: int, coins: int = 0, xp: int = 0):
-    """امتیاز هیچ‌وقت کم نمی‌شه — فقط اضافه می‌شه."""
-    await (await db()).execute(
-        "UPDATE players SET score=score+?, coins=coins+?, xp=xp+? WHERE id=?",
-        (score, coins, xp, pid))
-    await (await db()).commit()
-
-async def xp_for_level(level: int) -> int:
-    return 50 * level * level
+async def tx_operation(coro_fn):
+    """اجرای اتمیک چند مرحله‌ای داخل یک تراکنش."""
+    async with _pool.acquire() as c:
+        async with c.transaction():
+            return await coro_fn(c)
