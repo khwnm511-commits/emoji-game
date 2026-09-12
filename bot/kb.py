@@ -18,6 +18,13 @@ def main_menu(player) -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
+def back_owner() -> InlineKeyboardMarkup:
+    # پروفایل صاحب ربات — با دکمه بکاپ فوری
+    from . import config
+    kb = [[Btn(text="🛡 بکاپ فوری دیتابیس", callback_data="bk:now")],
+          [Btn(text="🔙 منوی اصلی", callback_data="m:main")]]
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
 def back_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[Btn(text="🔙 منوی اصلی", callback_data="m:main")]])
 

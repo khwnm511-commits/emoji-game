@@ -1,4 +1,4 @@
-import json, time
+import asyncio, json, time
 from aiogram import Router, F, Bot
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
@@ -79,7 +79,7 @@ async def profile(cbq: CallbackQuery):
             f"⚡️ انرژی: **{p['energy']}/100**\n"
             f"💉 واکسن: **{p['vaccines']}**   💔 دل‌های شکسته: **{p['broken_hearts']}**\n"
             f"🆔 آیدی من: **{p[chr(105)+chr(100)]}**\n🎭 ایموجی‌های من: **{len(owned)}/۱۰۰**\n{text_part}",
-            reply_markup=kb.back_main(), entities=ents)
+            reply_markup=kb.back_owner() if config.OWNER_ID and p[chr(105)+chr(100)] == config.OWNER_ID else kb.back_main(), entities=ents)
         return await cbq.answer()
     await cbq.message.edit_text(
         f"👤 **{p['name']}** — Lv.{p['level']}\n\n"
@@ -88,8 +88,22 @@ async def profile(cbq: CallbackQuery):
         f"❤️ HP: **{p['hp']}/{p['max_hp']}**   🗡 ATK: **{p['attack']}**   🛡 DEF: **{p['defense']}**\n"
         f"⚡️ انرژی: **{p['energy']}/100**\n"
         f"🆔 آیدی من: **{p[chr(105)+chr(100)]}**\n🎭 ایموجی‌ها: **{len(owned)}/۱۰۰** (از فروشگاه بخر!)",
-        reply_markup=kb.back_main())
+        reply_markup=kb.back_owner() if config.OWNER_ID and p[chr(105)+chr(100)] == config.OWNER_ID else kb.back_main())
     await cbq.answer()
+
+@r.callback_query(F.data == "bk:now")
+async def backup_now(cbq: CallbackQuery):
+    if not config.OWNER_ID or cbq.from_user.id != config.OWNER_ID:
+        return await cbq.answer("🔒 فقط صاحب ربات می‌تونه!", show_alert=True)
+    await cbq.answer("در حال بکاپ...")
+    from . import backup
+    try:
+        path = await asyncio.to_thread(backup.make_snapshot)
+        ok = await backup.send_backup(cbq.bot, path, note="🛡 بکاپ دستی — همه‌چیز سالمه")
+        await cbq.answer("✅ بکاپ ساخته شد و توی پیویت فرستادم!" if ok else "⚠️ بکاپ ساخته شد ولی ارسال نشد",
+                         show_alert=True)
+    except Exception as e:
+        await cbq.answer(f"⚠️ خطا در بکاپ: {e}", show_alert=True)
 
 @r.callback_query(F.data == "m:top")
 async def top(cbq: CallbackQuery):
